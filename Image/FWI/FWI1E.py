@@ -3,7 +3,7 @@
 # Purpose: FWI1 encoder class
 
 from PIL import Image
-from FWI1Common import _FWI1_DataHdr
+from FWI1Common import _FWI1_DataHdr, _FWI1_MainHdr, FWI1Header, FWI1_16to8
 from operator import length_hint
 
 #global data
@@ -105,44 +105,63 @@ def FWI1_Imageto565(image):
         data.append((r>>3<<11)|(g>>2<<5)|(b>>3))
     return data
 
-def FWI1_16to8(img_data):
-    out = bytearray(length_hint(img_data)<<2)
-    for i in range(0, length_hint(img_data)):
-        out[i<<1] = img_data[i]&0xff
-        out[(i<<1)+1] = img_data[i]>>8
-    return out
+def FWI1_int_encode(data = None, prev_data = None, size = 0):
+    global cmd, cmd_size, len, len_size, lit, lit_size, in8bit, indices, offs
+    global currbits, bwrite
+    
+    if data is None:
+        raise ValueError("Data is None")
 
+    lzoff = 0
+    lzlen = 0
+    rllen = 0
+    in8bit = FWI1_16to8(data)
 
-class FWI1Encoder():
-    def encode(self, file):
-        global cmd, cmd_size, len, len_size, lit, lit_size, in8bit, indices, offs
-        
-        img = Image.open(file)
-        w,h = img.width, img.height
-        data = FWI1_Imageto565(img)
+    prev_in8bit = None
+    if prev_data is not None:
+        prev_in8bit = FWI1_16to8(prev_data)
 
-        lzoff = 0
-        lzlen = 0
-        rllen = 0
-        in8bit = FWI1_16to8(data)
+    indices = [0] * ((65536)<<3)
 
-        indices = [0] * ((65536)<<3)
+    cmd = bytearray(size<<2)
+    cmd_size = 0
+    len = bytearray(size<<1)
+    len_size = 0
+    lit = [0]*size
+    lit_size = 0
 
-        cmd = bytearray(length_hint(data)<<2)
-        cmd_size = 0
-        len = bytearray(length_hint(data)<<1)
-        len_size = 0
-        lit = [0]*length_hint(data)
-        lit_size = 0
+    offs = 0
+    szi = size<<1
 
-        offs = 0
-        szi = length_hint(data)<<1
+    currbits = 32
+    bwrite = 0
 
-        lzpoffs = 0
-        lzplen = 0
-        lzoff = 0
-        lzlen = 0
-        while offs<szi:
+    lzpoffs = 0
+    lzplen = 0
+    lzoff = 0
+    lzlen = 0
+    while offs<szi:
+        has_prev_match = False
+        prev_match_len = 0
+        if prev_in8bit is not None:
+            curr_pos = offs>>1
+            while ((prev_match_len<<1)< MATCH_LEN_MAX()) and (curr_pos+prev_match_len<<1) < szi and prev_data[curr_pos+prev_match_len] == data[curr_pos+prev_match_len]:
+                prev_match_len += 1
+            if prev_match_len > 0:
+                has_prev_match = True
+
+        if has_prev_match:
+            FWI1_write(3, 2)
+            FWI1_write(0 if prev_match_len > 256 else 1, 1)
+            if prev_match_len > 256:
+                len[len_size] = prev_match_len&0xff
+                len[len_size+1] = prev_match_len>>8
+                len_size += 2
+            else:
+                len[len_size] = prev_match_len-1
+                len_size += 1
+            offs += prev_match_len<<1
+        else:
             indices_off = in8bit[offs]<<8
             lzlen = 0
             if (szi-offs) > MATCH_LEN_MAX():
@@ -236,31 +255,51 @@ class FWI1Encoder():
                 
                 indices[indices_off + off_tmp[in8bit[offs]]] = offs - 1
 
-        #flush cmd bits
-        cmd[cmd_size] = (bwrite>>24)&0xff
-        cmd[cmd_size+1] = ((bwrite>>16)&0xff)
-        cmd[cmd_size+2] = ((bwrite>>8)&0xff)
-        cmd[cmd_size+3] = (bwrite & 0xff)
-        cmd_size+=4
+    #flush cmd bits
+    cmd[cmd_size] = (bwrite>>24)&0xff
+    cmd[cmd_size+1] = ((bwrite>>16)&0xff)
+    cmd[cmd_size+2] = ((bwrite>>8)&0xff)
+    cmd[cmd_size+3] = (bwrite & 0xff)
+    cmd_size+=4
 
-        out_dat = bytearray((_FWI1_DataHdr.sizeof() + cmd_size + lit_size + len_size))
-        out_dat_size = 0
-        # write header -> cmd -> len -> lit
-        hdr = _FWI1_DataHdr.build(dict(cmd_size=cmd_size, len_size=len_size))
-        out_dat[:length_hint(hdr)] = hdr
-        out_dat_size += length_hint(hdr)
+    out_dat = bytearray((_FWI1_DataHdr.sizeof() + cmd_size + lit_size + len_size))
+    out_dat_size = 0
+    # write header -> cmd -> len -> lit
+    hdr = _FWI1_DataHdr.build(dict(cmd_size=cmd_size, len_size=len_size, lit_size=lit_size))
+    out_dat[:length_hint(hdr)] = hdr
+    out_dat_size += length_hint(hdr)
 
-        for i in range(0, cmd_size, 1):
-            out_dat[out_dat_size] = cmd[i]
-            out_dat_size += 1
+    for i in range(0, cmd_size, 1):
+        out_dat[out_dat_size] = cmd[i]
+        out_dat_size += 1
 
-        for i in range(0, len_size, 1):
-            out_dat[out_dat_size] = len[i]
-            out_dat_size += 1
+    for i in range(0, len_size, 1):
+        out_dat[out_dat_size] = len[i]
+        out_dat_size += 1
 
-        for i in range(0, lit_size, 2):
-            out_dat[out_dat_size] = lit[i>>1]&0xff
-            out_dat[out_dat_size+1] = lit[i>>1]>>8
-            out_dat_size += 2
+    for i in range(0, lit_size, 2):
+        out_dat[out_dat_size] = lit[i>>1]&0xff
+        out_dat[out_dat_size+1] = lit[i>>1]>>8
+        out_dat_size += 2
 
-        return out_dat, w, h
+    return out_dat
+
+class FWI1Encoder():
+    def __init__(self):
+        pass
+
+    def create_hdr(self, w, h):
+        return FWI1Header().write_to_hdr(w, h, 0)
+
+    def encode(self, file, prev_file=None):
+        #### decode to rgb565.
+        img = Image.open(file)
+        w,h = img.width, img.height
+        data = FWI1_Imageto565(img)
+
+        if prev_file is not None:
+            prev_img = Image.open(prev_file)
+            prev_data = FWI1_Imageto565(prev_img)
+            return FWI1_int_encode(data, prev_data, w*h)
+        else:
+            return FWI1_int_encode(data, None, w*h)
