@@ -61,8 +61,6 @@ def FWI1_int_decode(frame, w, h, out_data):
     lenp = frame["len"]
     litp = frame["lit"]
 
-    print(frame["cmd_size"], frame["len_size"], frame["lit_size"])
-
     last_off = 0
     last_len = 0
 
